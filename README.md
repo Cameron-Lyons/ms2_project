@@ -1,2 +1,3 @@
-# ms2_project
- Milestone 2 Project for MADS
+# Text Difficulty
+ Determine which snippets of text should be simplified for wikipedia.
+ Also seperate the text into meaningful clusters
