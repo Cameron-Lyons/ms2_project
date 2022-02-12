@@ -332,6 +332,17 @@ def k_means_tags(input_df, tag_label, return_scores = None):
     
     return pd.DataFrame(inertia_scores),return_scores
 
+def gen_word_cloud(df, tag_col, cluster, cluster_col):
+    text = df[df[cluster_col]==cluster][tag_col].str.cat(sep=' ') # Read the whole text.
+
+    wordcloud = WordCloud().generate(text)
+    wordcloud = WordCloud(background_color="white", repeat=True).generate(text)
+    plt.figure()
+    plt.imshow(wordcloud, interpolation="bilinear")
+    plt.axis("off")
+    
+    return plt
+
 if __name__ == '__main__':
     build_dataset()
     lda_build()
@@ -346,4 +357,4 @@ if __name__ == '__main__':
     tagged_df.to_csv('outputs/tagged_df.csv')
     oth_scores = other_tags(tagged_df, 'tags')
     inertia_dict, score_dict = k_means_tags(tagged_df, 'tags', oth_scores)
-    
+    gen_word_cloud(tag_df, 'tags',3,'cluster').show()
