@@ -1,0 +1,349 @@
+import pandas as pd
+import numpy as np
+from tqdm import tqdm
+import matplotlib.pyplot as plt
+import time
+import pyLDAvis.sklearn
+from pylab import bone, pcolor, colorbar, plot, show, rcParams, savefig
+from itertools import chain
+import pickle
+import spacy
+from collections import Iterable
+import ast
+
+from sklearn.model_selection import GridSearchCV
+from sklearn.cluster import AffinityPropagation, KMeans, DBSCAN, Birch, MiniBatchKMeans, OPTICS
+from sklearn.metrics import silhouette_score
+from sklearn.decomposition import LatentDirichletAllocation
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.manifold import TSNE
+
+from wordcloud import WordCloud
+
+def lemmatizer_alt(input):
+    lemma_list = [token.lemma_ for token in input if token.is_stop == False and token.is_punct==False]
+
+    return lemma_list
+
+def build_dataset():
+    wiki = pd.read_csv('assets/WikiLarge_Train.csv')
+
+    l_start = time.time()
+    nlp = spacy.load("en_core_web_sm", exclude=['parser', "ner"])
+    wiki['nlp_text'] =  [doc for doc in nlp.pipe(wiki["original_text"].tolist())]
+    wiki['tokenized_text'] = wiki["nlp_text"].apply(lemmatizer_alt)
+    l_duration = time.time() - l_start
+    print('Pipe Model Timing: {:.2f} seconds'.format(l_duration), flush=True)
+
+    wiki = wiki[[
+        'original_text',
+        'label',
+        'tokenized_text'
+    ]]
+
+    wiki.to_csv('outputs/wiki_tokenized.csv')
+
+def lda_build():
+
+    l_start = time.time()
+    wiki = pd.read_csv('outputs/wiki_tokenized.csv')
+    wiki['token_list'] = wiki['tokenized_text'].apply(ast.literal_eval)
+    input_list = wiki['token_list'].str.join(" ")
+    l_duration = time.time() - l_start
+    print('List Construction: {:.2f} seconds'.format(l_duration), flush=True)
+    
+    l_start = time.time()
+    vectorizer = TfidfVectorizer(
+        analyzer='word',       
+        min_df=10,
+        token_pattern='[a-zA-Z0-9]{4,}' # Ensure every token is at least 4 char long
+    )
+    data_vectorized = vectorizer.fit_transform(input_list)
+    l_duration = time.time() - l_start
+    print("Number of topics: {:.0f}".format(data_vectorized.shape[1]))
+    print('Vector Construction: {:.2f} seconds'.format(l_duration), flush=True)
+    
+    search_params = {
+        'n_components': [10, 15, 20], 
+        'learning_decay': [.5, .7, .9]
+    }
+
+    l_start = time.time()
+    lda = LatentDirichletAllocation(
+        max_iter=5, 
+        learning_method='online', 
+        learning_offset=50.,
+        random_state=42,
+        verbose=1
+    )
+    
+    model = GridSearchCV(
+        lda, 
+        param_grid=search_params,
+        verbose=1,
+        n_jobs=1
+    )
+    
+    model.fit(data_vectorized)
+    l_duration = time.time() - l_start
+    print('LDA Grid Search: {:.2f} seconds'.format(l_duration), flush=True)
+    
+    l_start = time.time()
+    best_lda_model = model.best_estimator_
+    data_lda = best_lda_model.transform(data_vectorized)
+    search_results = model.cv_results_
+    l_duration = time.time() - l_start
+    print('Grid Search Data Extraction: {:.2f} seconds'.format(l_duration), flush=True)
+
+    pickle.dump(vectorizer, open("outputs/vectorizer.pkl", "wb"))
+    pickle.dump(data_vectorized, open("outputs/data_vectorized.pkl", "wb"))
+    pickle.dump(data_lda, open("outputs/data_lda.pkl", "wb"))
+    pickle.dump(best_lda_model, open("outputs/lda_model.pkl", 'wb'))
+    pickle.dump(search_results, open("outputs/grid_search_results.pkl", 'wb'))
+
+def plot_grid_search(cv_results, grid_param_1, grid_param_2, name_param_1, name_param_2):
+    scores_mean = cv_results['mean_test_score']
+    scores_mean = np.array(scores_mean).reshape(len(grid_param_2),len(grid_param_1))
+
+    scores_sd = cv_results['std_test_score']
+    scores_sd = np.array(scores_sd).reshape(len(grid_param_2),len(grid_param_1))
+
+    _, ax = plt.subplots(1,1)
+
+    for idx, val in enumerate(grid_param_2):
+        ax.plot(grid_param_1, scores_mean[idx,:], '-o', label= name_param_2 + ': ' + str(val))
+
+    ax.set_xlabel(name_param_1)
+    ax.set_ylabel('Log Likelyhood')
+    ax.legend(loc="best")
+    ax.grid('on')
+    plt.show()
+
+def LDA_plot():
+    lda_model = pickle.load(open("outputs/lda_model.pkl", "rb"))
+    data_vectorized = pickle.load(open("outputs/data_vectorized.pkl", "rb"))
+    vectorizer = pickle.load(open("outputs/vectorizer.pkl", "rb"))
+    pyLDAvis.enable_notebook()
+    dash = pyLDAvis.sklearn.prepare(lda_model, data_vectorized, vectorizer, mds='tsne')
+    return dash
+
+def tag_df(n_items):
+    wiki = pd.read_csv('outputs/wiki_tokenized.csv')
+    lda_model = pickle.load(open("outputs/lda_model.pkl", "rb"))
+    data_vectorized = pickle.load(open("outputs/data_vectorized.pkl", "rb"))
+    vectorizer = pickle.load(open("outputs/vectorizer.pkl", "rb"))
+    
+    threshold = 0 #Arbitrary, might change
+    n_topics = 10  # Change to best fit
+    
+
+    list_scores = []
+    list_words = []
+
+    feature_names = np.array(vectorizer.get_feature_names())
+    lda_components = lda_model.components_ #/ lda_model.components_.sum(axis=1)[:, np.newaxis] # normalization
+
+    total_length = len(wiki)
+    return_df = {
+        'index': [],
+        'tag': []
+    }
+    
+    for index, row in wiki.iterrows():
+
+        if index % 1000 == 0 and index > 0:
+            print('Percent complete: {:.2%}'.format(index/total_length))
+
+        text_projection = data_vectorized[index,:].toarray()
+        
+        element_score = np.multiply(text_projection[0],lda_components)
+        non_zero = np.nonzero(element_score)
+        
+        l_words = {}
+        for i,j in zip(non_zero[0],non_zero[1]):
+            if feature_names[j] in l_words:
+                l_words[feature_names[j] ] += element_score[i,j]
+            else:
+                l_words[feature_names[j] ] = element_score[i,j]
+        l_words = [k for k, v in sorted(l_words.items(), key=lambda item: item[1], reverse=True)]
+        if len(l_words) >= n_items:
+            l_words = l_words[:n_items]
+            
+        
+        return_df['index'].append(index)
+        return_df['tag'].append(" ".join(list(l_words)))
+        
+    return_df = pd.DataFrame(return_df).set_index('index')
+    wiki = wiki.join(return_df)
+    return wiki
+def other_tags(input_df, tag_label, return_scores = None):
+    
+    method = []
+    method_scores = []
+
+    l_start = time.time()
+    lda_model = pickle.load(open("outputs/lda_model.pkl", "rb"))
+    vectorizer = pickle.load(open("outputs/vectorizer.pkl", "rb"))
+    input_df = input_df[input_df[tag_label].str.len()>0]
+    X_i = vectorizer.transform(input_df[tag_label])
+    print(X_i.shape)
+    print(lda_model.components_.shape)
+    X = X_i @ lda_model.components_.T
+    print(X.shape)
+    l_duration = time.time() - l_start
+    print('Vectorization: {:.2f} seconds'.format(l_duration), flush=True)
+    
+    
+    l_start = time.time()
+    lda_cluster = np.argmax(X, axis=1)
+    l_duration = time.time() - l_start
+    print('LDA clustering: {:.2f} seconds'.format(l_duration), flush=True)
+    print(lda_cluster.shape)
+    lda_ss = silhouette_score(X, lda_cluster, sample_size=10000)  #Depending on speed, may need to change sample size
+    print('Lda score: {:.4f}'.format(lda_ss), flush=True)
+    method.append('LDA')
+    method_scores.append(lda_ss)
+    
+    #DBSCAN
+    l_start = time.time()
+    db_clustering = DBSCAN(eps=3, min_samples=2).fit(X)
+    l_duration = time.time() - l_start
+    print('DBSCAN: {:.2f} seconds'.format(l_duration), flush=True)
+    
+    num_clusters = len(list(set(db_clustering.labels_)))
+    db_ss = silhouette_score(X, db_clustering.labels_, sample_size=10000)  #Depending on speed, may need to change sample size
+    
+    
+    print('DBSCAN score: {:.4f}'.format(db_ss), flush=True)
+    print("DBSCAN number of clusters: " +str(num_clusters))
+    method.append('DBSCAN')
+    method_scores.append(db_ss)
+    
+    index_range = np.arange(0,X.shape[0],1000)
+    
+    #BIRCH
+    l_start = time.time()
+    brc = Birch(n_clusters=None)
+    for index,val in enumerate(index_range):
+        #print('Birch Current index: '+str(index))
+        #l_start = time.time()
+        if index+1 >= len(index_range):
+            brc = brc.partial_fit(X[val:X.shape[0],:])
+        else:
+            brc = brc.partial_fit(X[val:index_range[index+1],:])
+        #l_duration = time.time() - l_start
+    
+    l_duration = time.time() - l_start
+    print('BIRCH fit: {:.2f} seconds'.format(l_duration), flush=True)
+
+    l_start = time.time()
+    brc_labels = brc.predict(X)
+    num_clusters = len(list(set(brc_labels)))
+    l_duration = time.time() - l_start
+    print('BIRCH predict: {:.2f} seconds'.format(l_duration), flush=True)
+    print("Birch number of clusters: " +str(num_clusters))
+    
+    birch_ss = silhouette_score(X, brc_labels, sample_size=10000)  #Depending on speed, may need to change sample size
+    print('Birch score: {:.4f}'.format(birch_ss), flush=True)
+    
+    method.append('BIRCH')
+    method_scores.append(birch_ss)
+    
+    if return_scores is None:
+        return_scores = pd.DataFrame({
+            'method':method,
+            'method_scores':method_scores,
+        })
+    else:
+        l_return_scores = pd.DataFrame({
+            'method':method,
+            'method_scores':method_scores,
+        })
+        return_scores.append(l_return_scores, ignore_index=True)
+
+    return return_scores
+
+def k_means_tags(input_df, tag_label, return_scores = None):
+    
+    method = []
+    method_scores = []
+
+    interial_clusters = []
+    intertia = []
+    
+    l_start = time.time()
+    lda_model = pickle.load(open("outputs/lda_model.pkl", "rb"))
+    vectorizer = pickle.load(open("outputs/vectorizer.pkl", "rb"))
+    input_df = input_df[input_df[tag_label].str.len()>0]
+    X_i = vectorizer.transform(input_df[tag_label])
+    print(X_i.shape)
+    print(lda_model.components_.shape)
+    X = X_i @ lda_model.components_.T
+    print(X.shape)
+    l_duration = time.time() - l_start
+    print('Vectorization: {:.2f} seconds'.format(l_duration), flush=True)
+    
+    index_range = np.arange(0,X.shape[0],1000)
+    cluster_range = [10,30,50,70,100,300,400,500,600,700,800,900,1000]
+    
+    for el in cluster_range:
+        kmeans = MiniBatchKMeans(n_clusters=el,random_state=0,batch_size=6)
+        l_start = time.time()
+        for index,val in enumerate(index_range):
+            if index+1 >= len(index_range):
+                kmeans = kmeans.partial_fit(X[val:X.shape[0],:])
+            else:
+                kmeans = kmeans.partial_fit(X[val:index_range[index+1],:])
+        l_duration = time.time() - l_start
+        print('Kmeans fit: {:.2f} seconds'.format(l_duration), flush=True)
+
+
+        l_start = time.time()
+        kmeans_labels = kmeans.predict(X)
+        l_duration = time.time() - l_start
+        print('Kmeans predict: {:.2f} seconds'.format(l_duration), flush=True)
+
+        kmeans_ss = silhouette_score(X, kmeans_labels, sample_size=10000)  #Depending on speed, may need to change sample size
+        print('Kmeans score: {:.4f}'.format(kmeans_ss), flush=True)
+        print("Number of clusters: " +str(el))
+        
+        method.append('K Means '+str(el)+' clusters')
+        method_scores.append(kmeans_ss)
+        
+        interial_clusters.append(el)
+        intertia.append(kmeans.inertia_)
+        
+
+    inertia_scores = pd.DataFrame({
+        'interia_clusters': interial_clusters,
+        'interia_score': intertia
+    })
+    if return_scores is None:
+        return_scores = pd.DataFrame({
+            'method':method,
+            'method_scores':method_scores,
+        })
+    else:
+        l_return_scores = pd.DataFrame({
+            'method':method,
+            'method_scores':method_scores,
+        })
+        return_scores = return_scores.append(l_return_scores, ignore_index=True)
+    
+    return pd.DataFrame(inertia_scores),return_scores
+
+if __name__ == '__main__':
+    build_dataset()
+    lda_build()
+    grid_data = pickle.load(open("outputs/grid_search_results.pkl", "rb"))
+    search_params = {
+        'n_components': [10, 15, 20], 
+        'learning_decay': [.5, .7, .9]
+    }
+    plot_grid_search(grid_data, search_params['n_components'], search_params['learning_decay'], 'N Components', 'Learning Decay')
+    LDA_plot()
+    tagged_df = tag_df(5)
+    tagged_df.to_csv('outputs/tagged_df.csv')
+    oth_scores = other_tags(tagged_df, 'tags')
+    inertia_dict, score_dict = k_means_tags(tagged_df, 'tags', oth_scores)
+    
