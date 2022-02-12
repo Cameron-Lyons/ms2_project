@@ -332,6 +332,25 @@ def k_means_tags(input_df, tag_label, return_scores = None):
     
     return pd.DataFrame(inertia_scores),return_scores
 
+def plot_silhouette_score(score_dict):
+    method = score_dict['method'].to_list()
+    method_scores = score_dict['method_scores'].to_list()
+
+    plt.bar(method, method_scores)
+    plt.xlabel("Clustering Method")
+    plt.xticks(rotation=90)
+    plt.ylabel("Silhouette Score")
+    return plt
+
+def plot_kmeans_inertia(inertia_dict):
+    range_n_clusters = inertia_dict['interia_clusters'].to_list()
+    avg_distance = inertia_dict['interia_score'].to_list()
+
+    plt.plot(range_n_clusters, avg_distance)
+    plt.xlabel("Number of Clusters (k)")
+    plt.ylabel("Distance")
+    return plt
+
 def tag_best_k_means(input_df, tag_label, num_clusters):
     
     l_start = time.time()
@@ -373,6 +392,7 @@ def gen_word_cloud(df, tag_col, cluster, cluster_col):
 
     wordcloud = WordCloud().generate(text)
     wordcloud = WordCloud(background_color="white", repeat=True).generate(text)
+
     plt.figure()
     plt.imshow(wordcloud, interpolation="bilinear")
     plt.axis("off")
@@ -393,5 +413,7 @@ if __name__ == '__main__':
     tagged_df.to_csv('outputs/tagged_df.csv')
     oth_scores = other_tags(tagged_df, 'tags')
     inertia_dict, score_dict = k_means_tags(tagged_df, 'tags', oth_scores)
+    plot_silhouette_score(score_dict)
+    plot_kmeans_inertia(inertia_dict)
     tag_df = tag_best_k_means(tagged_df, 'tags', 400)
     gen_word_cloud(tag_df, 'tags',3,'cluster').show()
