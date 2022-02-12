@@ -332,6 +332,42 @@ def k_means_tags(input_df, tag_label, return_scores = None):
     
     return pd.DataFrame(inertia_scores),return_scores
 
+def tag_best_k_means(input_df, tag_label, num_clusters):
+    
+    l_start = time.time()
+    lda_model = pickle.load(open("outputs/lda_model.pkl", "rb"))
+    vectorizer = pickle.load(open("outputs/vectorizer.pkl", "rb"))
+    input_df = input_df[input_df[tag_label].str.len()>0]
+    X_i = vectorizer.transform(input_df[tag_label])
+    print(X_i.shape)
+    print(lda_model.components_.shape)
+    X = X_i @ lda_model.components_.T
+    print(X.shape)
+    l_duration = time.time() - l_start
+    print('Vectorization: {:.2f} seconds'.format(l_duration), flush=True)
+    
+    index_range = np.arange(0,X.shape[0],1000)
+
+    kmeans = MiniBatchKMeans(n_clusters=num_clusters,random_state=0,batch_size=6)
+    l_start = time.time()
+    for index,val in enumerate(index_range):
+        if index+1 >= len(index_range):
+            kmeans = kmeans.partial_fit(X[val:X.shape[0],:])
+        else:
+            kmeans = kmeans.partial_fit(X[val:index_range[index+1],:])
+    l_duration = time.time() - l_start
+    print('Kmeans fit: {:.2f} seconds'.format(l_duration), flush=True)
+
+
+    l_start = time.time()
+    kmeans_labels = kmeans.predict(X)
+    l_duration = time.time() - l_start
+    print('Kmeans predict: {:.2f} seconds'.format(l_duration), flush=True)
+    
+    input_df['cluster'] = kmeans_labels
+
+    return input_df
+
 def gen_word_cloud(df, tag_col, cluster, cluster_col):
     text = df[df[cluster_col]==cluster][tag_col].str.cat(sep=' ') # Read the whole text.
 
@@ -357,4 +393,5 @@ if __name__ == '__main__':
     tagged_df.to_csv('outputs/tagged_df.csv')
     oth_scores = other_tags(tagged_df, 'tags')
     inertia_dict, score_dict = k_means_tags(tagged_df, 'tags', oth_scores)
+    tag_df = tag_best_k_means(tagged_df, 'tags', 400)
     gen_word_cloud(tag_df, 'tags',3,'cluster').show()
